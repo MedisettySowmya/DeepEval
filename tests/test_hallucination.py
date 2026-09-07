@@ -1,65 +1,84 @@
+import json
 import pytest
 
-from utils.dataset_loader import load_all_datasets
-from config.ollama_config import generate_response
+from utils.dataset_loader_copy import load_qa_boat_datasets
+from config.qa_boat_config import generate_response_qa_boat
 from evaluators.hallucination_evaluator import HallucinationEvaluator
-from utils.severity_utils import (get_severity, get_severity_score)
+from utils.severity_utils import get_severity, get_severity_score
 from utils.report_generator import results_data
 
 
-dataset = load_all_datasets(
-    "datasets/hallucination_dataset_with_types.xlsx"
+dataset = load_qa_boat_datasets(
+    "datasets/Test_dataset.xlsx"
 )
 
 evaluator = HallucinationEvaluator()
 
 
 @pytest.mark.parametrize("data", dataset)
-def test_hallucination(data: any):
+def test_hallucination(data: dict):
 
     category = data["category"]
+    requirement = data["requirement"]
+    acceptance_criteria = data["acceptance_criteria"]
 
-    prompt = data["input"]
+    prompt = f"""
+Generate test cases for the following requirement.
 
-    context = data["context"]
+Requirement:
+{requirement}
 
-    actual_output = generate_response(prompt)
+Acceptance Criteria:
+{acceptance_criteria}
 
-    result = evaluator.evaluate(
-        input_text=prompt,
-        actual_output_text=actual_output,
-        context_text=context
-    )
-    print("Score:",result["score"])
+Return only valid JSON with testCases.
+"""
 
-    hallucination_percentage = result["score"] * 100
+    actual_output = generate_response_qa_boat(prompt)
 
-    severity = get_severity(hallucination_percentage)
-    severity_score = get_severity_score(severity)
-  
-    results_data.append({
-        "Category": category,
-        "Question": prompt,
-        "Context": context,
-        "LLM Response": actual_output,
-        "Hallucination %": round(hallucination_percentage, 2),
-        "Reason": result["reason"],
-        "Severity": severity,
-        "Severity Score": severity_score
-    })
-   
-    print("\n===================================")
-    print("Category:", category)
-    print("Prompt:", prompt)
-    print("Context:", context)
-    print("Actual Output:", actual_output)
-    print("Hallucination %:", hallucination_percentage)
-    print("Reason:", result["reason"])
-    print("Severity:", severity)
-    print("Severity Score:", severity_score)
-    print("===================================\n")
+    generated_data = json.loads(actual_output)
+    
 
-    (
-    f"Hallucination score {result['score']} exceeded threshold. "
-    f"Reason: {result['reason']}"
-    )
+    generated_test_cases = generated_data["testCases"]
+
+    evaluation_context = [
+        f"Requirement:\n{requirement}\n\n"
+        f"Acceptance Criteria:\n{acceptance_criteria}"
+    ]
+
+    for test_case in generated_test_cases:
+
+        test_case_output = json.dumps(test_case, indent=2)
+
+        result = evaluator.evaluate(
+            input_text=requirement,
+            actual_output_text=test_case_output,
+            context_text=evaluation_context
+        )
+
+        hallucination_percentage = result["score"] * 100
+
+        severity = get_severity(hallucination_percentage)
+
+        severity_score = get_severity_score(severity)
+
+        results_data.append({
+            "Category": category,
+            "Test Case ID": test_case.get(
+                "testCaseId",
+                test_case.get("id", "Not available")
+            ),
+            "Test Case Title": test_case.get(
+                "title",
+                test_case.get("description", "Not available")
+            ),
+            "Requirement": requirement,
+            "Acceptance Criteria": acceptance_criteria,
+            "Generated Test Case": test_case_output,
+            "Hallucination %": round(hallucination_percentage, 2),
+            "Reason": result["reason"],
+            "Severity": severity,
+            "Severity Score": severity_score
+        })
+
+    assert True
