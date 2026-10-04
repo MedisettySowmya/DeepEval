@@ -1,6 +1,6 @@
 from deepeval.metrics import HallucinationMetric
 from deepeval.test_case import LLMTestCase
-from config.ollama_config import load_model
+from config.judge_model_resolver import load_model
 
 
 class HallucinationEvaluator:

@@ -1,7 +1,7 @@
 import pytest
 
 from utils.dataset_loader import load_all_datasets
-from config.ollama_config import generate_response
+from config.generator_resolver import generate_response
 from evaluators.hallucination_evaluator import HallucinationEvaluator
 from utils.severity_utils import (get_severity, get_severity_score)
 from utils.report_generator import results_data

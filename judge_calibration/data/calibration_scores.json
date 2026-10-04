@@ -1,0 +1,9 @@
+{
+  "HallucinationMetric": {
+    "Prompt": {
+      "agreement": 1.0,
+      "sample_size": 1,
+      "confidence_label": "high"
+    }
+  }
+}

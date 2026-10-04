@@ -1,20 +1,19 @@
 import ollama
-from deepeval.models import OllamaModel
 
 
-def load_model():
-    return OllamaModel(model="phi3")
+def generate_response(prompt, model, endpoint=None, temperature=0, timeout=300):
 
+    client = ollama.Client(host=endpoint, timeout=timeout)
 
-def generate_response(prompt):
-    response = ollama.chat(
-        model="phi3",
+    response = client.chat(
+        model=model,
         messages=[
             {
                 "role": "user",
                 "content": prompt
             }
-        ]
+        ],
+        options={"temperature": temperature}
     )
 
     return response["message"]["content"]
