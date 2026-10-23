@@ -1,12 +1,11 @@
-from config.generator_resolver import generate_response
+from models.model_client import generate_response
 from utils.response_validator import validate_response
-from utils.prompt_builder import build_prompt
+from prompts.prompt_builder import build_prompt
 from evaluators.metric_manager import evaluate_test_case_detailed
-from classification.result_classifier import classify_test_case
-from root_cause_analysis.analyzer import analyze_test_case
-from metric_tiering.tier_classifier import annotate_evaluation_result
+from evaluators.result_classifier import classify_test_case
+from evaluators.root_cause_analyzer import analyze_test_case
+from evaluators.tier_classifier import annotate_evaluation_result
 from human_review.review_gate import get_review_reasons
-
 
 def _invalid_input_result(test_case, classify_fn, analyze_fn, review_fn):
     """Stage 0's first gate, before the model call.
@@ -44,7 +43,6 @@ def _invalid_input_result(test_case, classify_fn, analyze_fn, review_fn):
         "human_review": review_fn(test_case, None),
     }
 
-
 def run_test_case(
     test_case,
     generate_fn=None,
@@ -56,7 +54,12 @@ def run_test_case(
     instruction_variant=None,
     send_context=None,
 ):
+    """Run one row: validate input, generate, validate answer, score, report.
 
+    Optional *_fn arguments let offline tests supply fake implementations.
+    """
+
+    # 1. Use the normal implementations unless a caller supplies replacements.
     generate_fn = generate_fn or generate_response
     evaluate_fn = evaluate_fn or evaluate_test_case_detailed
     classify_fn = classify_fn or classify_test_case
@@ -64,18 +67,18 @@ def run_test_case(
     tier_fn = tier_fn or annotate_evaluation_result
     review_fn = review_fn or get_review_reasons
 
-    if not test_case.get("input_valid", bool(test_case.get("input"))):
+    # 2. Stop before calling the model if the spreadsheet input is invalid.
+    input_is_valid = test_case.get("input_valid", bool(test_case.get("input")))
+    if not input_is_valid:
         return _invalid_input_result(test_case, classify_fn, analyze_fn, review_fn)
 
+    # 3. Build the prompt, generate an answer and check it is usable.
     prompt = build_prompt(
         test_case,
         instruction_variant=instruction_variant,
         send_context=send_context,
     )
 
-    # The generator takes the assembled text; everything downstream also needs
-    # to know whether the Context reached the model, which is why build_prompt
-    # returns a dict rather than a bare string.
     validation_result = validate_response(generate_fn, prompt["text"])
 
     if not validation_result["valid"]:
@@ -96,15 +99,13 @@ def run_test_case(
             "human_review": review_fn(test_case, None),
         }
 
+    # 4. Score the answer. Some callers return metrics without stage details.
     evaluated = evaluate_fn(
         test_case=test_case,
         prompt=prompt,
         actual_output=validation_result["response"],
     )
 
-    # evaluate_test_case_detailed returns {"metrics": ..., "stages": ...};
-    # a plain dict of metric results (the older shape, or an injected test
-    # double) is accepted too.
     if isinstance(evaluated, dict) and "metrics" in evaluated:
         evaluation_result = evaluated["metrics"]
         stage_outcomes = evaluated.get("stages")
@@ -112,6 +113,7 @@ def run_test_case(
         evaluation_result = evaluated
         stage_outcomes = None
 
+    # 5. Add trust levels, classification, failure explanations and review flags.
     evaluation_result = tier_fn(
         evaluation_result, category=test_case.get("category")
     )

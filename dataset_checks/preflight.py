@@ -1,42 +1,22 @@
-# ---------------------------------------------------------------------------
-# Pre-flight dataset checks.
-#
-# Three DeepEval metrics read only the spreadsheet -- Input, Context and
-# Ground truth -- and never the model's answer:
-#
-#   ContextualRelevancyMetric   ['input', 'retrieval_context']
-#   ContextualPrecisionMetric   ['input', 'retrieval_context', 'expected_output']
-#   ContextualRecallMetric      ['input', 'retrieval_context', 'expected_output']
-#
-# None of them declares actual_output, and LLMTestCase does not require one
-# (it defaults to None). So they need no generator, and a metric that cannot
-# be affected by the answer does not need to wait for one. They run here, over
-# the whole sheet, BEFORE any generation is paid for -- which matters now that
-# the judge is a billed API: a row whose Context contradicts its Ground truth
-# is worth catching in seconds rather than discovering in a report after a
-# long run.
-#
-# Their failures are statements about the dataset, not about the model. This
-# module never reports a model defect.
-# ---------------------------------------------------------------------------
+"""Check spreadsheet data before generating model answers.
 
+Flow: run_preflight -> check_row -> infer_context_role -> report.
+Missing inputs skip a check; judge failures are recorded as errors.
+"""
 from deepeval.test_case import LLMTestCase
 
-from config import model_config
-from config.judge_model_resolver import load_model
+from config import settings
+from models.model_client import create_judge
 from evaluators.metric_manager import ALL_METRIC_MODULES
 from evaluators.metric_registry import DATASET_CHECK_METRICS
-from utils.dataset_loader import (
+from dataset_checks.dataset_loader import (
     CONTEXT_ROLE_ADVERSARIAL,
     CONTEXT_ROLE_SUPPORTING,
     CONTEXT_ROLE_UNKNOWN,
 )
 
-
 def _build_dataset_test_case(test_case):
-    """No actual_output: these metrics do not read it, and omitting it makes
-    the absence of a model answer explicit rather than faked with a
-    placeholder."""
+    """Convert a dataset row to DeepEval's format, without a model answer."""
 
     context = test_case.get("context") or None
 
@@ -45,7 +25,6 @@ def _build_dataset_test_case(test_case):
         retrieval_context=context,
         expected_output=test_case.get("expected_answer"),
     )
-
 
 def check_row(test_case, judge_model=None):
     """Runs the dataset checks applicable to one row.
@@ -56,17 +35,34 @@ def check_row(test_case, judge_model=None):
 
     results = {}
 
-    if not test_case.get("has_context"):
+    # 1. All dataset checks need a valid question and context.
+    input_is_valid = test_case.get("input_valid", bool(test_case.get("input")))
+    skip_reason = None
+    if not input_is_valid:
+        skip_reason = "invalid or empty Input"
+    elif not test_case.get("has_context"):
+        skip_reason = "no Context in this row; nothing to check it against"
+
+    if skip_reason:
         for metric_key in DATASET_CHECK_METRICS:
             results[metric_key] = {
                 "status": "not_applicable",
-                "reason": "no Context in this row; nothing to check it against",
+                "reason": skip_reason,
             }
         return results
 
     llm_test_case = _build_dataset_test_case(test_case)
 
     for metric_key in DATASET_CHECK_METRICS:
+
+        # 2. Precision and recall need a factual reference answer.
+        needs_reference_answer = metric_key != "ContextualRelevancyMetric"
+        if needs_reference_answer and test_case.get("expects_abstention"):
+            results[metric_key] = {
+                "status": "not_applicable",
+                "reason": "Ground_Truth describes behaviour, not a reference answer",
+            }
+            continue
 
         module = ALL_METRIC_MODULES.get(metric_key)
 
@@ -83,9 +79,10 @@ def check_row(test_case, judge_model=None):
             results[metric_key] = {"status": "not_applicable", "reason": reason}
             continue
 
+        # 3. Run the check and record its result. Keep errors in the report.
         try:
             if judge_model is None:
-                judge_model = load_model()
+                judge_model = create_judge()
 
             metric = module.build(judge_model)
             metric.measure(llm_test_case)
@@ -101,36 +98,30 @@ def check_row(test_case, judge_model=None):
 
     return results
 
-
 def infer_context_role(check_results):
-    """Derives whether a row's Context supports or contradicts its Ground
-    truth, with no extra model call and no new Excel column.
+    """Estimate context role using existing precision and recall scores.
 
-    ContextualPrecision asks "does the Context support the Ground truth";
-    ContextualRecall asks "is the Ground truth recoverable from the Context".
-    Neither reads the answer, so a simultaneous failure says only one thing:
-    the Context and the Ground truth describe different worlds. That is the
-    adversarial signal -- deliberate on a trap row, a data bug anywhere else.
-
-    Returns one of the CONTEXT_ROLE_* constants. Unknown when the evidence is
-    absent or errored, so a missing judge never silently produces
-    "supporting" and disables the inversion rule.
+    Unavailable checks give 'unknown'. All available scores at or below the
+    threshold give 'adversarial'; otherwise return 'supporting'. This is a
+    heuristic, not proof that the context is deliberately misleading.
     """
 
     precision = check_results.get("ContextualPrecisionMetric") or {}
     recall = check_results.get("ContextualRecallMetric") or {}
 
-    statuses = (precision.get("status"), recall.get("status"))
-
-    if not all(status in ("passed", "failed") for status in statuses):
+    completed_statuses = ("passed", "failed")
+    if precision.get("status") not in completed_statuses:
+        return CONTEXT_ROLE_UNKNOWN
+    if recall.get("status") not in completed_statuses:
         return CONTEXT_ROLE_UNKNOWN
 
-    threshold = model_config.ADVERSARIAL_CONTEXT_THRESHOLD
+    threshold = settings.ADVERSARIAL_CONTEXT_THRESHOLD
 
-    scores = [
-        score for score in (precision.get("score"), recall.get("score"))
-        if score is not None
-    ]
+    scores = []
+    for result in (precision, recall):
+        score = result.get("score")
+        if score is not None:
+            scores.append(score)
 
     if not scores:
         return CONTEXT_ROLE_UNKNOWN
@@ -140,22 +131,11 @@ def infer_context_role(check_results):
 
     return CONTEXT_ROLE_SUPPORTING
 
-
 def run_preflight(dataset, judge_model=None, infer_roles=True):
-    """Checks every row in the dataset before any generation happens.
+    """Check each row and return detailed findings plus summary counts.
 
-    When `infer_roles` is set, each row's `context_role` is filled in from its
-    own check results, so the inversion rule in metric_manager has what it
-    needs in the same run rather than the next one. The dataset rows are
-    mutated in place, which is how the orchestrator receives the value.
-
-    Returns a report:
-        {
-            "rows": [{"id", "category", "input", "checks", "context_role",
-                      "data_warnings"}, ...],
-            "summary": {"rows", "with_warnings", "adversarial", "supporting",
-                        "unknown"},
-        }
+    With infer_roles=True, also update each original row's context_role
+    for later scoring. False leaves the original rows unchanged.
     """
 
     judge_model = judge_model or None
@@ -165,9 +145,9 @@ def run_preflight(dataset, judge_model=None, infer_roles=True):
 
         checks = check_row(test_case, judge_model=judge_model)
 
-        role = infer_context_role(checks) if infer_roles else CONTEXT_ROLE_UNKNOWN
-
+        role = CONTEXT_ROLE_UNKNOWN
         if infer_roles:
+            role = infer_context_role(checks)
             test_case["context_role"] = role
 
         rows.append({
@@ -196,15 +176,7 @@ def run_preflight(dataset, judge_model=None, infer_roles=True):
 
     return {"rows": rows, "summary": summary}
 
-
-# ---------------------------------------------------------------------------
-# Deterministic data-hygiene checks. No model, no metric -- plain inspection
-# of the cells, for the defects that a judge-based check would describe only
-# indirectly.
-# ---------------------------------------------------------------------------
-
 _LEAKED_PREFIXES = ("context:", "ground truth:", "ground_truth:", "answer:")
-
 
 def get_data_warnings(test_case, check_results=None):
     """Returns a list of {code, message} warnings about the row's own cells."""

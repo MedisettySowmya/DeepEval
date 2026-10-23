@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepEval</title>
+<style>
+  :root {
+    --bg:#f4f6f8; --surface:#fff; --surface-2:#eef1f5; --line:#d7dde5;
+    --fg:#1b2430; --fg-dim:#5c6878; --fg-faint:#8a95a3;
+    --accent:#0d7d8c; --accent-soft:#e0f2f4;
+    --ok:#1d7a4c; --ok-soft:#e2f3e9;
+    --bad:#a52f2f; --bad-soft:#fbe6e6;
+    --warn:#96600a; --warn-soft:#fdf0d8;
+    --human:#6b3fa0; --human-soft:#efe7f9;
+    --mono: ui-monospace, Menlo, Consolas, "Courier New", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#11161c; --surface:#1a2129; --surface-2:#222b35; --line:#313c48;
+      --fg:#e6ebf1; --fg-dim:#9aa6b4; --fg-faint:#6e7986;
+      --accent:#45b8c6; --accent-soft:#12333a;
+      --ok:#5fcc90; --ok-soft:#13301f;
+      --bad:#f08a8a; --bad-soft:#3a1b1b;
+      --warn:#e0ad53; --warn-soft:#332611;
+      --human:#b996e8; --human-soft:#261a38;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--fg); font-size:15px; line-height:1.55;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width:1180px; margin:0 auto; padding-inline:16px; padding-block:26px 56px; }
+  h1 { font-size:26px; font-weight:600; margin:0 0 4px; }
+  .sub { color:var(--fg-dim); margin:0; font-size:13.5px; max-width:70ch; }
+  .note {
+    margin-top:14px; padding:10px 14px; border-left:3px solid var(--accent);
+    background:var(--accent-soft); border-radius:0 6px 6px 0; font-size:13.5px;
+  }
+  .cols {
+    display:grid; grid-template-columns:minmax(0,340px) minmax(0,1fr);
+    gap:22px; margin-top:24px; align-items:start;
+  }
+  @media (max-width:860px) { .cols { grid-template-columns:minmax(0,1fr); } }
+  .panel { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  h2 {
+    font-size:11px; text-transform:uppercase; letter-spacing:.09em;
+    color:var(--fg-faint); font-weight:600; margin:0 0 14px;
+  }
+  .field { display:flex; flex-direction:column; gap:5px; margin-bottom:14px; }
+  .field label { font-size:12.5px; font-weight:500; color:var(--fg-dim); }
+  .field .hint { font-size:11.5px; color:var(--fg-faint); font-family:var(--mono); }
+  input, textarea {
+    font-family:var(--mono); font-size:13px; color:var(--fg); background:var(--surface-2);
+    border:1px solid var(--line); border-radius:6px; padding:8px 10px; width:100%; resize:vertical;
+  }
+  input:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  button {
+    font:inherit; font-weight:500; width:100%; padding:10px 14px; border-radius:7px;
+    border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer;
+  }
+  button:hover:not([disabled]) { filter:brightness(1.08); }
+  button[disabled] { opacity:.55; cursor:default; }
+  .models { margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); font-size:12px; color:var(--fg-faint); }
+  .models strong { color:var(--fg-dim); font-family:var(--mono); }
+
+  .verdict { border-radius:10px; padding:14px 16px; margin-bottom:12px; border:1px solid var(--line); background:var(--surface); }
+  .verdict .big { font-size:17px; font-weight:600; margin:0 0 4px; }
+  .verdict.pass .big { color:var(--ok); }
+  .verdict.fail .big { color:var(--bad); }
+  .verdict.run .big { color:var(--accent); }
+  .verdict p { margin:0; font-size:13.5px; color:var(--fg-dim); }
+  .verdict ul { margin:8px 0 0; padding-left:20px; font-size:13.5px; }
+
+  .step { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:10px; }
+  .step-head { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 10px; }
+  .step-head .what { font-weight:600; font-size:14.5px; min-width:0; }
+  .folder {
+    font-family:var(--mono); font-size:11.5px; color:var(--accent);
+    background:var(--accent-soft); border-radius:4px; padding:1px 6px; overflow-wrap:anywhere;
+  }
+  .out {
+    margin-top:10px; background:var(--surface-2); border-radius:7px; padding:10px 12px;
+    font-family:var(--mono); font-size:12.5px; white-space:pre-wrap; overflow-wrap:anywhere;
+  }
+  .kv { display:flex; gap:8px; }
+  .kv + .kv { margin-top:3px; }
+  .kv .k { color:var(--fg-faint); flex:none; }
+  .kv .v { overflow-wrap:anywhere; min-width:0; }
+  .tablewrap { margin-top:10px; overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; min-width:520px; }
+  th {
+    text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:.07em;
+    color:var(--fg-faint); font-weight:600; padding:0 10px 6px 0; border-bottom:1px solid var(--line);
+  }
+  td { padding:6px 10px 6px 0; border-bottom:1px solid var(--line); vertical-align:top; }
+  td.m { font-family:var(--mono); }
+  td.num { font-variant-numeric:tabular-nums; }
+  td.why { color:var(--fg-dim); }
+  tr.stage td {
+    font-size:11px; text-transform:uppercase; letter-spacing:.07em;
+    color:var(--fg-faint); padding-top:12px; border-bottom:none;
+  }
+  .pill { display:inline-block; font-size:11px; font-weight:500; padding:1px 7px; border-radius:99px; white-space:nowrap; }
+  .p-passed,.p-trusted { background:var(--ok-soft); color:var(--ok); }
+  .p-failed,.p-error { background:var(--bad-soft); color:var(--bad); }
+  .p-not_applicable { background:var(--surface-2); color:var(--fg-faint); }
+  .p-advisory { background:var(--warn-soft); color:var(--warn); }
+  .p-requires_human_review { background:var(--human-soft); color:var(--human); }
+  .flag { margin-top:10px; padding:9px 11px; border-radius:7px; font-size:12.5px; background:var(--human-soft); color:var(--human); }
+  .err { background:var(--bad-soft); color:var(--bad); font-family:var(--mono); font-size:12px; white-space:pre-wrap; padding:12px; border-radius:8px; overflow-x:auto; }
+  .idle { color:var(--fg-dim); font-size:13.5px; }
+  .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--accent); border-right-color:transparent; border-radius:50%; animation:sp .7s linear infinite; vertical-align:-1px; margin-right:6px; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation:none; } }
+
+  .steps .elapsed { font-size:13.5px; font-weight:600; color:var(--accent); margin-bottom:12px; }
+  .rstep { display:flex; align-items:flex-start; gap:10px; padding:6px 0; }
+  .rstep .mark { flex:none; width:16px; text-align:center; margin-top:2px; font-size:12px; line-height:1; }
+  .rstep .label { font-size:13.5px; }
+  .rstep .detail { font-size:11.5px; color:var(--fg-faint); margin-top:1px; }
+  .rstep.done .mark { color:var(--ok); }
+  .rstep.done .label { color:var(--fg-dim); }
+  .rstep.active .label { color:var(--accent); font-weight:600; }
+  .rstep.pending .mark { color:var(--fg-faint); }
+  .rstep.pending .label { color:var(--fg-faint); }
+  .rstep.pending .detail { display:none; }
+  .steps .approx { margin-top:12px; font-size:11.5px; color:var(--fg-faint); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Eval Console</h1>
+  <p class="sub">Run one test case through the same pipeline your pytest suite uses. Nothing here
+    touches your Excel dataset or your test runs.</p>
+  <div class="note">
+    Excel stays the source of truth for the regression suite. This is for trying a single prompt
+    and seeing exactly what each stage did.
+  </div>
+
+  <div class="cols">
+    <form class="panel" id="form" autocomplete="off">
+      <h2>Test case</h2>
+
+      <div class="field">
+        <label for="f-input">Question</label>
+        <textarea id="f-input" rows="2" required>Which planet is known as the Red Planet?</textarea>
+        <span class="hint">Excel column: Input</span>
+      </div>
+
+      <div class="field">
+        <label for="f-context">Context (optional)</label>
+        <textarea id="f-context" rows="2">Venus is known as the Red Planet.</textarea>
+        <span class="hint">Excel column: Context</span>
+      </div>
+
+      <div class="field">
+        <label for="f-truth">Ground truth (optional)</label>
+        <textarea id="f-truth" rows="2">Mars is known as the Red Planet.</textarea>
+        <span class="hint">Excel column: Ground_Truth</span>
+      </div>
+
+      <div class="field">
+        <label for="f-pattern">Required pattern (optional)</label>
+        <input id="f-pattern" value="" placeholder="e.g. \d{4}">
+        <span class="hint">Excel column: Pattern &mdash; a regex the answer must contain</span>
+      </div>
+
+      <button type="submit" id="run">Run evaluation</button>
+
+      <div class="models" id="models">Loading model configuration&hellip;</div>
+    </form>
+
+    <div id="trace">
+      <div class="panel idle">
+        Fill in a question and press <strong>Run evaluation</strong>. A run takes a couple of
+        minutes: phi3 writes the answer, then the judge scores each applicable metric.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const STAGE_NAMES = {
+  0: "Stage 0 — generation",
+  1: "Stage 1 — deterministic (no AI judge)",
+  2: "Stage 2 — relevance",
+  3: "Stage 3 — grounding (answer vs context)",
+  4: "Stage 4 — reference (answer vs ground truth)",
+  5: "Stage 5 — safety"
+};
+
+function esc(v) {
+  return String(v === null || v === undefined ? "" : v)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+function pill(v) {
+  const t = (v === null || v === undefined || v === "") ? "—" : String(v).replace(/_/g, " ");
+  return '<span class="pill p-' + esc(v) + '">' + esc(t) + "</span>";
+}
+function score(v) {
+  if (v === null || v === undefined) return "—";
+  const n = Number(v);
+  return isNaN(n) ? esc(v) : n.toFixed(2);
+}
+function kv(pairs) {
+  return '<div class="out">' + pairs.map(function (p) {
+    return '<div class="kv"><span class="k">' + esc(p[0]) + '</span><span class="v">' + esc(p[1]) + "</span></div>";
+  }).join("") + "</div>";
+}
+function step(what, folder, inner) {
+  return '<div class="step"><div class="step-head"><span class="what">' + esc(what) +
+    '</span><span class="folder">' + esc(folder) + "</span></div>" + (inner || "") + "</div>";
+}
+
+function metricTable(evaluation, diagnoses) {
+  const keys = Object.keys(evaluation).sort(function (a, b) {
+    const sa = evaluation[a].stage === null || evaluation[a].stage === undefined ? 99 : evaluation[a].stage;
+    const sb = evaluation[b].stage === null || evaluation[b].stage === undefined ? 99 : evaluation[b].stage;
+    return sa - sb || a.localeCompare(b);
+  });
+
+  let rows = "", current = "\u0000";
+  keys.forEach(function (k) {
+    const m = evaluation[k];
+    const stage = m.stage === null || m.stage === undefined ? 99 : m.stage;
+    if (stage !== current) {
+      current = stage;
+      rows += '<tr class="stage"><td colspan="6">' + esc(STAGE_NAMES[stage] || "Not staged") + "</td></tr>";
+    }
+    const d = (diagnoses || {})[k] || {};
+    let why = m.interpretation || m.reason || "";
+    if (d.recommended_action) why = why ? why + " → " + d.recommended_action : d.recommended_action;
+    rows += "<tr>" +
+      '<td class="m">' + esc(k) + "</td>" +
+      "<td>" + pill(m.status) + "</td>" +
+      '<td class="num">' + score(m.score) + "</td>" +
+      '<td class="m">' + esc(m.tier) + "</td>" +
+      "<td>" + pill(m.gating_status) + "</td>" +
+      '<td class="why">' + esc(why) + "</td>" +
+      "</tr>";
+  });
+
+  return '<div class="tablewrap"><table><thead><tr><th>Metric</th><th>Result</th><th>Score</th>' +
+    "<th>Tier</th><th>Counts toward pass/fail?</th><th>Reason</th></tr></thead><tbody>" +
+    rows + "</tbody></table></div>";
+}
+
+function renderResult(job) {
+  const tc = job.test_case || {};
+  const r = job.result || {};
+  const v = r.validation || {};
+  const cls = r.classification || {};
+  const rca = r.root_cause_analysis || {};
+  const evaluation = r.evaluation || null;
+
+  const blocking = [];
+  if (evaluation) {
+    Object.keys(evaluation).forEach(function (k) {
+      const m = evaluation[k];
+      if (m.gating_status === "trusted" && (m.status === "failed" || m.status === "error")) {
+        blocking.push(k + " (" + m.status + ", score " + score(m.score) + ")");
+      }
+    });
+  }
+
+  let out = "";
+
+  if (!v.valid) {
+    out += '<div class="verdict fail"><p class="big">No answer to evaluate</p>' +
+      "<p>" + esc(v.failure_type) + " — " + esc(v.reason) +
+      ". This is an infrastructure fault, not a quality finding.</p></div>";
+  } else if (blocking.length) {
+    out += '<div class="verdict fail"><p class="big">Blocked — ' + blocking.length +
+      " trusted metric" + (blocking.length === 1 ? "" : "s") + " failed</p>" +
+      "<p>Only trusted results can fail a run. Advisory results are shown but never gate.</p><ul>" +
+      blocking.map(function (b) { return "<li>" + esc(b) + "</li>"; }).join("") + "</ul></div>";
+  } else {
+    out += '<div class="verdict pass"><p class="big">Not blocked — no trusted metric failed</p>' +
+      "<p>Finished in " + esc(job.elapsed) + "s. Advisory and human-review results below may still need a look.</p></div>";
+  }
+
+  out += step("Row built", "utils/dataset_loader.py — build_test_case()", kv([
+    ["profile", tc.profile],
+    ["has_context", tc.has_context],
+    ["has_reference", tc.has_reference],
+    ["expects_abstention", tc.expects_abstention],
+    ["context_role", tc.context_role],
+    ["pattern", tc.expected_pattern || "(none)"]
+  ]));
+
+  if (r.prompt) {
+    out += step("Prompt sent to the model", "utils/prompt_builder.py",
+      kv([["mode", r.prompt.mode], ["context_in_prompt", r.prompt.context_in_prompt],
+          ["instruction", r.prompt.instruction_variant || "(none)"], ["version", r.prompt.version]]) +
+      '<div class="out">' + esc(r.prompt.text) + "</div>");
+  }
+
+  if (v.valid) {
+    out += step("Model answered", "models/model_client.py",
+      '<div class="out">' + esc(v.response) + "</div>");
+  }
+
+  if (evaluation) {
+    out += step("Metrics", "evaluators/metric_manager.py + metric_registry.py",
+      metricTable(evaluation, rca.metric_level));
+  }
+
+  out += step("Evidence available", "classification/result_classifier.py",
+    kv([["classification", cls.classification]].concat(
+      cls.behavior_signal ? [["behaviour", cls.behavior_signal.signal]] : [])));
+
+  if (r.human_review && r.human_review.length) {
+    out += step("Human review", "human_review/review_gate.py",
+      '<div class="flag">' + esc(r.human_review.join("; ")) + "</div>");
+  }
+
+  document.getElementById("trace").innerHTML = out;
+}
+
+const btn = document.getElementById("run");
+let timer = null;
+
+// Shown while a run is in flight, lighting up one stage at a time in the
+// pipeline's real fixed order. The pipeline itself only reports a result at
+// the very end -- it has no "which stage am I on" signal to poll -- so this
+// advances on a plain timer rather than on anything the backend reports.
+// It is deliberately labelled "approximate" below so it never reads as more
+// precise than it is. The authoritative step-by-step trace (built from the
+// real evaluation result, including which stages were actually skipped)
+// still replaces this the moment the run finishes.
+const RUN_STEPS = [
+  ["Building test case", "utils/dataset_loader.py — build_test_case()"],
+  ["Stage 0 — generating the answer", "the generator model writes a response to the prompt"],
+  ["Stage 1 — deterministic checks", "exact match / numeric / pattern — no AI judge involved"],
+  ["Stage 2 — relevance", "judge checks the answer addresses the question"],
+  ["Stage 3 — grounding", "judge checks the answer against the context"],
+  ["Stage 4 — reference", "judge checks the answer against ground truth"],
+  ["Stage 5 — safety", "bias / toxicity / PII checks"]
+];
+const STEP_SECONDS = 20; // pacing only -- not read from the backend
+
+function showRunning(seconds) {
+  const activeIndex = Math.min(Math.floor(seconds / STEP_SECONDS), RUN_STEPS.length - 1);
+
+  let rows = "";
+  RUN_STEPS.forEach(function (s, i) {
+    const state = i < activeIndex ? "done" : (i === activeIndex ? "active" : "pending");
+    const mark = state === "done" ? "&#10003;" : (state === "active" ? '<span class="spin"></span>' : "&#9675;");
+    rows += '<div class="rstep ' + state + '"><span class="mark">' + mark + '</span>' +
+      '<div><div class="label">' + esc(s[0]) + '</div><div class="detail">' + esc(s[1]) + '</div></div></div>';
+  });
+
+  document.getElementById("trace").innerHTML =
+    '<div class="panel steps">' +
+      '<div class="elapsed">Running&hellip; ' + seconds + 's</div>' +
+      rows +
+      '<p class="approx">Shown in this pipeline’s fixed stage order, paced on a timer &mdash; ' +
+      'the pipeline itself only reports a result at the end, so this is not a live read of its ' +
+      'progress. Stages 3 and 4 are skipped when Stage 2 fails; the final result below will show ' +
+      'what actually ran.</p>' +
+    "</div>";
+}
+
+document.getElementById("form").addEventListener("submit", function (e) {
+  e.preventDefault();
+
+  const payload = {
+    input: document.getElementById("f-input").value,
+    context: document.getElementById("f-context").value,
+    ground_truth: document.getElementById("f-truth").value,
+    pattern: document.getElementById("f-pattern").value,
+    id: "ui",
+    category: "ui"
+  };
+
+  btn.disabled = true;
+  btn.textContent = "Running…";
+
+  let seconds = 0;
+  showRunning(seconds);
+  timer = setInterval(function () { seconds += 1; showRunning(seconds); }, 1000);
+
+  function finish() {
+    clearInterval(timer);
+    btn.disabled = false;
+    btn.textContent = "Run evaluation";
+  }
+
+  fetch("/api/run", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }).then(function (res) {
+    return res.json().then(function (data) {
+      if (!res.ok) throw new Error(data.error || "Request failed");
+      return data;
+    });
+  }).then(function (data) {
+    const poll = setInterval(function () {
+      fetch("/api/status?id=" + encodeURIComponent(data.id))
+        .then(function (r) { return r.json(); })
+        .then(function (job) {
+          if (job.state === "running") return;
+          clearInterval(poll);
+          finish();
+          if (job.state === "error") {
+            document.getElementById("trace").innerHTML =
+              '<div class="verdict fail"><p class="big">The run raised an error</p>' +
+              "<p>Shown in full rather than reported as a result.</p></div>" +
+              '<div class="err">' + esc(job.error) + "</div>";
+          } else {
+            renderResult(job);
+          }
+        }).catch(function (err) {
+          clearInterval(poll); finish();
+          document.getElementById("trace").innerHTML =
+            '<div class="verdict fail"><p class="big">Lost contact with the server</p><p>' +
+            esc(err.message) + "</p></div>";
+        });
+    }, 1000);
+  }).catch(function (err) {
+    finish();
+    document.getElementById("trace").innerHTML =
+      '<div class="verdict fail"><p class="big">Could not start the run</p><p>' +
+      esc(err.message) + "</p></div>";
+  });
+});
+
+fetch("/api/config").then(function (r) { return r.json(); }).then(function (c) {
+  document.getElementById("models").innerHTML =
+    "Generator <strong>" + esc(c.generator) + "</strong><br>" +
+    "Judge <strong>" + esc(c.judge) + "</strong><br>" +
+    "Different generator and judge models: <strong>" + (c.different_models ? "Yes" : "No") + "</strong>";
+}).catch(function () {
+  document.getElementById("models").textContent = "Could not read model configuration.";
+});
+</script>
+</body>
+</html>

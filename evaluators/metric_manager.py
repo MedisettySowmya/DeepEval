@@ -1,7 +1,7 @@
 from deepeval.test_case import LLMTestCase
 
-from config import model_config
-from config.judge_model_resolver import load_model
+from config import settings
+from models.model_client import create_judge
 
 from evaluators.metrics import (
     hallucination,
@@ -16,12 +16,11 @@ from evaluators.metrics import (
     pii_leakage,
 )
 from evaluators.metrics.generic import build_generic_modules
+from evaluators.metrics.configured import build_modules
+from evaluators.metrics.additional import build_modules as build_additional_modules
 from evaluators import metric_registry
-from utils.dataset_loader import CONTEXT_ROLE_ADVERSARIAL
+from dataset_checks.dataset_loader import CONTEXT_ROLE_ADVERSARIAL
 
-
-# Metrics with a hand-written module of their own (own class, required
-# params, config, applicability check, construction logic).
 _CORE_MODULES = {
     hallucination.KEY: hallucination,
     answer_correctness.KEY: answer_correctness,
@@ -35,32 +34,31 @@ _CORE_MODULES = {
     pii_leakage.KEY: pii_leakage,
 }
 
-# Every other DeepEval metric discovered in the installed package -- each
-# still its own module object, built generically rather than by hand. They
-# stay registered and discoverable; whether any of them is *relevant* to a
-# given row is decided by evaluators/metric_registry.py, not by field
-# presence.
-_GENERIC_MODULES = build_generic_modules(exclude_keys=set(_CORE_MODULES))
+_CORE_MODULES.update(build_modules())
+_CORE_MODULES.update(build_additional_modules())
+_GENERIC_METRIC_NAMES = (
+    set(metric_registry.REGISTRY) | set(metric_registry.DATASET_CHECK_METRICS)
+) - set(_CORE_MODULES)
+_GENERIC_MODULES = build_generic_modules(sorted(_GENERIC_METRIC_NAMES))
 
 ALL_METRIC_MODULES = {**_CORE_MODULES, **_GENERIC_MODULES}
 
-
-# Stage outcome, reported alongside the metric results so a reader can tell a
-# metric that failed from a metric that never ran.
 STAGE_RAN = "ran"
 STAGE_SKIPPED_BY_GATE = "skipped_by_gate"
 STAGE_NOT_RELEVANT = "not_relevant"
-
 
 def get_available_metrics():
     """1. Discover/register the available metric implementations."""
     return list(ALL_METRIC_MODULES.keys())
 
+def build_metric(module, judge_model, test_case):
+    if hasattr(module, "build_for_case"):
+        return module.build_for_case(judge_model, test_case)
+    return module.build(judge_model)
 
 def is_metric_available(key):
     """2. Check whether a requested metric is available."""
     return key in ALL_METRIC_MODULES
-
 
 def check_applicability(key, test_case, context_in_prompt=True):
     """3. Is this metric both relevant to this row and supplied with the data
@@ -79,14 +77,14 @@ def check_applicability(key, test_case, context_in_prompt=True):
 
     return module.is_applicable(test_case)
 
-
 def get_applicable_metrics(test_case, context_in_prompt=True):
     """4. Return only the metrics applicable to that test case."""
-    return [
-        key for key in ALL_METRIC_MODULES
-        if check_applicability(key, test_case, context_in_prompt)[0]
-    ]
-
+    applicable_metrics = []
+    for metric_key in ALL_METRIC_MODULES:
+        applicable, reason = check_applicability(metric_key, test_case, context_in_prompt)
+        if applicable:
+            applicable_metrics.append(metric_key)
+    return applicable_metrics
 
 def get_applicability_report(test_case, context_in_prompt=True):
     """Applicability for every registered metric, without executing any of
@@ -104,7 +102,6 @@ def get_applicability_report(test_case, context_in_prompt=True):
         }
 
     return report
-
 
 def _build_llm_test_case(test_case, prompt_text, actual_output, context_in_prompt):
     """Context is only handed to the metrics when it was actually sent to the
@@ -126,15 +123,10 @@ def _build_llm_test_case(test_case, prompt_text, actual_output, context_in_promp
         context=context if context_in_prompt else None,
         retrieval_context=context if context_in_prompt else None,
         expected_output=test_case.get("expected_answer"),
-        # The row's own regex from the Excel "Pattern" column. LLMTestCase has
-        # no dedicated field for it, so it travels in additional_metadata --
-        # which is how pattern_match reads it at measure time, since
-        # build(judge_model) never sees the dataset row.
         additional_metadata={
             pattern_match.METADATA_KEY: test_case.get("expected_pattern"),
         },
     )
-
 
 def _interpret(metric_key, metric, test_case):
     """Turns a measured score into passed/failed.
@@ -158,8 +150,10 @@ def _interpret(metric_key, metric, test_case):
     if not inverted:
         return ("passed" if metric.success else "failed"), None
 
-    threshold = model_config.RESISTANCE_PASS_THRESHOLD
+    threshold = settings.RESISTANCE_PASS_THRESHOLD
     score = metric.score if metric.score is not None else 0.0
+    if metric_key == "FaithfulnessMetric" and metric.score is not None:
+        score = 1.0 - metric.score
 
     return (
         ("passed" if score >= threshold else "failed"),
@@ -170,22 +164,20 @@ def _interpret(metric_key, metric, test_case):
         ),
     )
 
-
 def interpret_metric_result(metric_key, metric, test_case):
     """Public entry point to the same passed/failed reading _evaluate uses,
     for callers outside this module that re-run a metric and must apply the
-    identical inversion rule -- currently judge_calibration.calibration_runner,
+    identical inversion rule -- currently evaluators.calibration_runner,
     which re-runs a metric during calibration and would otherwise compare a
     human's verdict against DeepEval's raw, uninverted metric.success. Returns
     (status, interpretation) -- see _interpret."""
 
     return _interpret(metric_key, metric, test_case)
 
-
 def _evaluate(test_case, prompt, actual_output, context_in_prompt=True):
     """5. Execute the relevant metric modules, stage by stage.
 
-    `prompt` accepts either the dict returned by utils.prompt_builder.
+    `prompt` accepts either the dict returned by prompts.prompt_builder.
     build_prompt or a plain string (the older shape), so existing callers keep
     working.
 
@@ -202,6 +194,19 @@ def _evaluate(test_case, prompt, actual_output, context_in_prompt=True):
     metrics whose own inputs the failure bears on -- the dataset checks are
     not here at all, they run pre-flight.
     """
+
+    test_case = dict(test_case)
+    options = dict(test_case.get("metric_options") or {})
+    instruction = prompt.get("instruction", "") if isinstance(prompt, dict) else ""
+    options["PromptAlignmentMetric"] = {
+        "prompt_instructions": [instruction] if instruction else []
+    }
+    test_case["metric_options"] = options
+    options["InstructionPriority"] = {
+        **settings.METRIC_OPTIONS.get("InstructionPriority", {}),
+        **options.get("InstructionPriority", {}),
+        "trusted_instructions": [instruction] if instruction else [],
+    }
 
     if isinstance(prompt, dict):
         prompt_text = prompt.get("text") or ""
@@ -259,33 +264,23 @@ def _evaluate(test_case, prompt, actual_output, context_in_prompt=True):
                 }
                 continue
 
-            relevant, relevance_reason = metric_registry.check_relevance(
+            applicable, reason = check_applicability(
                 metric_key, test_case, context_in_prompt
             )
-
-            if not relevant:
-                results[metric_key] = {
-                    "status": "not_applicable",
-                    "stage": stage,
-                    "reason": relevance_reason,
-                }
-                continue
-
-            applicable, applicability_reason = module.is_applicable(test_case)
-
             if not applicable:
                 results[metric_key] = {
                     "status": "not_applicable",
                     "stage": stage,
-                    "reason": applicability_reason,
+                    "reason": reason,
                 }
                 continue
 
             try:
-                if judge_model is None:
-                    judge_model = load_model()
+                tier = getattr(module, "TIER", None) or getattr(module, "tier", None)
+                if judge_model is None and tier not in ("deterministic", "statistical"):
+                    judge_model = create_judge()
 
-                metric = module.build(judge_model)
+                metric = build_metric(module, judge_model, test_case)
                 metric.measure(llm_test_case)
 
                 status, interpretation = _interpret(metric_key, metric, test_case)
@@ -310,7 +305,6 @@ def _evaluate(test_case, prompt, actual_output, context_in_prompt=True):
                     "reason": str(error),
                 }
 
-        # A gate that ran and failed suppresses the stages below it.
         if (
             gate_failed_at is None
             and stage in metric_registry.GATE_STAGES
@@ -321,7 +315,6 @@ def _evaluate(test_case, prompt, actual_output, context_in_prompt=True):
 
     return results, stage_outcomes
 
-
 def evaluate_test_case(test_case, prompt, actual_output, context_in_prompt=True):
     """Metric results only -- the original return shape, so every existing
     caller (metric_tiering, root_cause_analysis, reporting, human_review,
@@ -329,7 +322,6 @@ def evaluate_test_case(test_case, prompt, actual_output, context_in_prompt=True)
 
     results, _ = _evaluate(test_case, prompt, actual_output, context_in_prompt)
     return results
-
 
 def evaluate_test_case_detailed(test_case, prompt, actual_output, context_in_prompt=True):
     """Metric results plus the per-stage outcome, for callers that want to show

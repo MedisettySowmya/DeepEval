@@ -1,16 +1,15 @@
 import pytest
 
-from config import model_config
-from config.judge_model_resolver import load_model
-from utils.dataset_loader import load_all_datasets
+from config import settings
+from models.model_client import create_judge
+from dataset_checks.dataset_loader import load_all_datasets
 from orchestrator.evaluation_orchestrator import run_test_case
 from reporting.report_generator import results_data
-
+from dataset_checks.preflight import run_preflight
 
 dataset = load_all_datasets(
     "datasets/hallucination_dataset_with_types.xlsx"
 )
-
 
 def test_judge_model_is_available():
     """Runs before the parametrized pipeline tests below. If the
@@ -23,24 +22,32 @@ def test_judge_model_is_available():
     loud and immediate instead of letting it hide across 48 silent rows."""
 
     try:
-        load_model()
+        create_judge()
     except Exception as error:
         pytest.fail(
             f"Configured judge model (JUDGE_PROVIDER="
-            f"{model_config.JUDGE_PROVIDER!r}, JUDGE_MODEL="
-            f"{model_config.JUDGE_MODEL!r}) could not be constructed: "
+            f"{settings.JUDGE_PROVIDER!r}, JUDGE_MODEL="
+            f"{settings.JUDGE_MODEL!r}) could not be constructed: "
             f"{error}. Every metric below will otherwise silently error "
             "and be excluded from gating -- a 'passed' result from this "
             "suite cannot be trusted until this is fixed."
         )
 
-
 @pytest.mark.parametrize("test_case", dataset)
 def test_pipeline(test_case):
 
+    preflight = run_preflight([test_case])
     result = run_test_case(test_case)
+    result["dataset_checks"] = preflight["rows"][0]
 
     results_data.append({"test_case": test_case, "result": result})
+
+    check_errors = [
+        f"{key}: {value.get('reason')}"
+        for key, value in result["dataset_checks"]["checks"].items()
+        if value.get("status") == "error"
+    ]
+    assert not check_errors, "Dataset check execution failed: " + "; ".join(check_errors)
 
     classification = (result.get("classification") or {}).get("classification")
 
@@ -60,10 +67,6 @@ def test_pipeline(test_case):
 
     evaluation = result.get("evaluation") or {}
 
-    # Only a "trusted" verdict (per metric_tiering) gates this test.
-    # advisory/not_applicable/requires_human_review results are surfaced
-    # in the report but never fail the test on their own -- that
-    # distinction is the entire point of Metric Tiering.
     trusted_failures = [
         f"{metric_key} (status={metric_result.get('status')}, score={metric_result.get('score')})"
         for metric_key, metric_result in evaluation.items()

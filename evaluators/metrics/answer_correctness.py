@@ -1,8 +1,7 @@
 from deepeval.metrics import GEval
 from deepeval.test_case import LLMTestCaseParams
 
-from config import model_config
-
+from config import settings
 
 KEY = "AnswerCorrectness"
 METRIC_CLASS = GEval
@@ -18,16 +17,14 @@ CRITERIA = (
     "with the expected output."
 )
 
-
 def is_applicable(test_case):
     if not test_case.get("expected_answer"):
         return False, "missing required test-case data: expected_output"
     return True, None
 
-
 def build(judge_model):
-    threshold = model_config.METRIC_THRESHOLDS.get(
-        KEY, model_config.DEFAULT_METRIC_THRESHOLD
+    threshold = settings.METRIC_THRESHOLDS.get(
+        KEY, settings.DEFAULT_METRIC_THRESHOLD
     )
     return GEval(
         name="Answer Correctness",

@@ -3,38 +3,13 @@ import os
 
 from deepeval.test_case import LLMTestCase
 
-from config.judge_model_resolver import load_model
-from evaluators.metric_manager import ALL_METRIC_MODULES, interpret_metric_result
+from models.model_client import create_judge
+from evaluators.metric_manager import ALL_METRIC_MODULES, interpret_metric_result, build_metric
 from judge_calibration.calibration_store import load_calibration_judgments
-
-
-# ---------------------------------------------------------------------------
-# Judge Calibration Layer (adapted from trustworthy-ai-eval-architecture.md
-# section 3.1, scoped to this single-model application).
-#
-# Purpose: stop treating a metric's verdict as automatically trustworthy --
-# measure how often it actually agrees with an independent human judgment,
-# and label results "unverified" until that's been checked.
-#
-# Deliberate scope adjustments vs. the original document:
-#   - Percent agreement, not Cohen's kappa/correlation -- with the sample
-#     sizes this project realistically has, kappa is more likely to
-#     mislead than clarify. This can be upgraded later if the calibration
-#     set grows large enough for that to matter.
-#   - Stratified by the dataset's existing `category` field, not a new
-#     "domain/task type" field -- nothing invented that isn't already in
-#     the data model.
-#   - This module computes and stores confidence scores and exposes a
-#     lookup function; it does not yet gate pass/fail decisions in the
-#     orchestrator or annotate live reports -- that would be a follow-up
-#     integration step, same as how every other module in this project
-#     started standalone before being wired in.
-# ---------------------------------------------------------------------------
 
 _SCORES_PATH = os.path.join(os.path.dirname(__file__), "data", "calibration_scores.json")
 
 HIGH_CONFIDENCE_THRESHOLD = 0.8
-
 
 def _ensure_scores_file():
     os.makedirs(os.path.dirname(_SCORES_PATH), exist_ok=True)
@@ -42,18 +17,15 @@ def _ensure_scores_file():
         with open(_SCORES_PATH, "w", encoding="utf-8") as scores_file:
             json.dump({}, scores_file, indent=2)
 
-
 def load_calibration_scores():
     _ensure_scores_file()
     with open(_SCORES_PATH, "r", encoding="utf-8") as scores_file:
         return json.load(scores_file)
 
-
 def _save_calibration_scores(scores):
     _ensure_scores_file()
     with open(_SCORES_PATH, "w", encoding="utf-8") as scores_file:
         json.dump(scores, scores_file, indent=2)
-
 
 def _judge_verdict(judgment, judge_model):
     """Re-runs the SAME metric this judgment is about, on the same
@@ -89,13 +61,12 @@ def _judge_verdict(judgment, judge_model):
         expected_output=test_case.get("expected_answer"),
     )
 
-    metric = metric_module.build(judge_model)
+    metric = build_metric(metric_module, judge_model, test_case)
     metric.measure(llm_test_case)
 
     status, _ = interpret_metric_result(judgment["metric_key"], metric, test_case)
 
     return "pass" if status == "passed" else "fail"
-
 
 def run_calibration(judgments=None, judge_model=None):
     """Deterministic agreement computation: for every recorded human
@@ -110,7 +81,7 @@ def run_calibration(judgments=None, judge_model=None):
     """
 
     judgments = judgments if judgments is not None else load_calibration_judgments()
-    judge_model = judge_model or load_model()
+    judge_model = judge_model or create_judge()
 
     tally = {}
 
@@ -144,7 +115,6 @@ def run_calibration(judgments=None, judge_model=None):
     _save_calibration_scores(scores)
 
     return scores
-
 
 def get_confidence_label(metric_key, category=None):
     """Deterministic lookup only -- no execution, no judge call. A metric

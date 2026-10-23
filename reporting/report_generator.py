@@ -2,51 +2,21 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
-from config import model_config
-from config.generator_resolver import get_generator_provider
-from config.judge_model_resolver import get_judge_provider, get_judge_independence
+from config import settings
 
+from models.model_client import uses_different_models
+from reporting.html_report import generate_html_report
 
-# Accumulator for a pytest run of the new pipeline (tests/test_evaluation_
-# pipeline.py appends {"test_case": ..., "result": ...} here per test
-# case; conftest.py reads it at session end). Separate from utils.report_
-# generator's own results_data -- the two pytest suites (old and new)
-# each keep their own list and produce their own report.
 results_data = []
 
-
 def _build_model_provenance_rows():
-    """Which models produced and graded this run, and whether the judge is
-    independent of the generator. get_judge_independence() previously had no
-    caller anywhere in the codebase -- a score is not interpretable without
-    knowing whether the model graded its own homework, so this is the first
-    thing on every report, not a buried config detail."""
+    """Record configured model identities without claiming independent judgment."""
 
     return [
-        {"Field": "Generator", "Value": f"{get_generator_provider()}/{model_config.GENERATOR_MODEL}"},
-        {"Field": "Judge", "Value": f"{get_judge_provider()}/{model_config.JUDGE_MODEL}"},
-        {"Field": "Judge Independent of Generator", "Value": get_judge_independence()},
+        {"Field": "Generator", "Value": f"{settings.GENERATOR_PROVIDER}/{settings.GENERATOR_MODEL}"},
+        {"Field": "Judge", "Value": f"{settings.JUDGE_PROVIDER}/{settings.JUDGE_MODEL}"},
+        {"Field": "Different Generator and Judge Models", "Value": "Yes" if uses_different_models() else "No"},
     ]
-
-
-# ---------------------------------------------------------------------------
-# Reporting -- consumes the structured results already produced by the
-# pipeline (orchestrator output + the original test case, and optionally a
-# benchmark regression report from Step 9). It never executes a metric,
-# never constructs an LLMTestCase, and never calls a judge model -- it only
-# reads fields that already exist on the dicts handed to it.
-#
-# Reuses the existing project reporting convention from
-# utils/report_generator.py: an execution_reports/<timestamp>/ folder,
-# written with pandas.ExcelWriter(engine="openpyxl"), with a "Summary"
-# sheet and the same "No test results were available" empty-case handling.
-# A new function/module was used instead of extending that file directly,
-# because its existing generate_excel_report() is hardcoded to a single
-# flat "Hallucination %" column and the old flat result-dict shape -- the
-# new pipeline produces a variable number of metrics (up to 48) per test
-# case, which that shape cannot represent. tests/test_hallucination.py and
-# utils/report_generator.py are left completely untouched.
-# ---------------------------------------------------------------------------
 
 def _context_to_text(context):
     if not context:
@@ -54,7 +24,6 @@ def _context_to_text(context):
     if isinstance(context, list):
         return " | ".join(str(item) for item in context)
     return str(context)
-
 
 def _build_test_case_rows(test_case_results):
 
@@ -104,7 +73,6 @@ def _build_test_case_rows(test_case_results):
 
     return rows
 
-
 def _build_metric_detail_rows(test_case_results):
 
     rows = []
@@ -140,7 +108,6 @@ def _build_metric_detail_rows(test_case_results):
             })
 
     return rows
-
 
 def _build_summary_sections(test_case_results, benchmark_regression_report):
 
@@ -197,7 +164,6 @@ def _build_summary_sections(test_case_results, benchmark_regression_report):
 
     return overview_df, metric_status_df, regression_summary_dfs
 
-
 def _build_regression_detail_rows(entries):
 
     rows = []
@@ -212,13 +178,12 @@ def _build_regression_detail_rows(entries):
 
     return rows
 
-
 def generate_report(test_case_results, benchmark_regression_report=None, output_dir=None):
     """test_case_results: list of {"test_case": <dataset row dict>,
     "result": <orchestrator.evaluation_orchestrator.run_test_case output>}.
 
     benchmark_regression_report: optional output of
-    benchmark.regression_checker.run_regression_check().
+    evaluators.regression_checker.run_regression_check().
 
     Purely reads already-computed fields -- no metric execution, no judge
     calls. Returns the path to the generated Excel report.
@@ -250,6 +215,24 @@ def generate_report(test_case_results, benchmark_regression_report=None, output_
             pd.DataFrame(_build_metric_detail_rows(test_case_results)).to_excel(
                 writer, sheet_name="Metric Details", index=False
             )
+
+            dataset_rows = []
+            for item in test_case_results:
+                preflight = item["result"].get("dataset_checks") or {}
+                for metric, detail in preflight.get("checks", {}).items():
+                    dataset_rows.append({
+                        "ID": preflight.get("id"),
+                        "Input": preflight.get("input"),
+                        "Context Role": preflight.get("context_role"),
+                        "Metric": metric,
+                        "Status": detail.get("status"),
+                        "Score": detail.get("score"),
+                        "Reason": detail.get("reason"),
+                    })
+            if dataset_rows:
+                pd.DataFrame(dataset_rows).to_excel(
+                    writer, sheet_name="Dataset Checks", index=False
+                )
 
             overview_df, metric_status_df, regression_summary_dfs = _build_summary_sections(
                 test_case_results, benchmark_regression_report
@@ -283,8 +266,10 @@ def generate_report(test_case_results, benchmark_regression_report=None, output_
 
     print(f"\nEvaluation Report Generated: {excel_path}")
 
-    return str(excel_path)
+    html_path = generate_html_report(test_case_results, report_folder)
+    print(f"HTML Report Generated:       {html_path}")
 
+    return str(excel_path)
 
 def _build_comparison_test_case_rows(comparison_report):
 
@@ -322,11 +307,10 @@ def _build_comparison_test_case_rows(comparison_report):
 
     return rows
 
-
 def generate_comparison_report(comparison_report, output_dir=None):
     """comparison_report: output of either
-    run_comparison.comparator.compare_runs, or
-    run_comparison.fair_comparison.compare_runs_with_condition (which adds
+    evaluators.comparator.compare_runs, or
+    evaluators.fair_comparison.compare_runs_with_condition (which adds
     comparison_condition/condition_metadata/condition_warning on top).
 
     Purely reads already-computed fields -- no metric execution, no judge
@@ -344,8 +328,8 @@ def generate_comparison_report(comparison_report, output_dir=None):
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
 
         info_rows = [
-            {"Field": "Judge", "Value": f"{get_judge_provider()}/{model_config.JUDGE_MODEL}"},
-            {"Field": "Judge Independent of Generator", "Value": get_judge_independence()},
+            {"Field": "Judge", "Value": f"{settings.JUDGE_PROVIDER}/{settings.JUDGE_MODEL}"},
+            {"Field": "Different Generator and Judge Models", "Value": "Yes" if uses_different_models() else "No"},
             {"Field": "Total Compared Test Cases", "Value": len(comparison_report.get("test_cases", []))},
             {"Field": "Newly Evaluated", "Value": len(comparison_report.get("newly_evaluated", []))},
             {"Field": "No Longer Evaluated", "Value": len(comparison_report.get("no_longer_evaluated", []))},

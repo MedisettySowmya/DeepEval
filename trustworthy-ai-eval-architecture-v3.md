@@ -3,6 +3,14 @@
 Supersedes `trustworthy-ai-eval-architecture.md` (v2), which is **kept as-is** for the record.
 This document is self-contained: it does not depend on v2 and can be read alone.
 
+Current configuration implementation: `config/settings.py` owns settings and
+validation; `models/model_client.py` owns Ollama generation and DeepEval judge
+construction. These replace the older config/resolver modules referenced in the
+implementation history below. Only Ollama is supported currently. Reports compare
+configured model identities using `uses_different_models()`; different model names
+do not establish independent judgment. See `METRIC_CONFIGURATION.md` for current
+configuration, migration details, and offline checks.
+
 ---
 
 ## 1. Premises
@@ -63,6 +71,45 @@ becomes `not_applicable` or `advisory`. Nothing is removed.
 
 ## 3. The metric universe
 
+### Current implementation status (2026-10-19)
+
+The historical inventory below is a design inventory, not an executed metric
+count. The answer-stage registry now contains **20 metrics**: the original 11
+plus `PromptAlignmentMetric`, `AbstentionMetric`, `MisuseMetric`,
+`NonAdviceMetric`, `AnswerCompleteness`, `CitationCorrectness`,
+`InstructionPriority`, `ROUGELMetric`, and `BLEUMetric`. Including the three
+pytest contextual dataset checks gives **23 connected metrics**. Applicability
+and stage gates still determine which run. This expanded scope includes custom
+checks and is not the historical inventory of 22 DeepEval stage mappings.
+See [metric configuration](METRIC_CONFIGURATION.md) for per-row setup and scoring.
+
+- Prompt alignment uses the exact instruction included by `build_prompt`.
+  Closed-book prompts currently contain no instruction, so alignment skips.
+- Abstention uses a GEval behaviour rubric only on `abstention_expected` rows.
+  It runs in the ungated final stage; it is not a trusted keyword-based gate.
+- Misuse requires an explicit domain and NonAdvice requires prohibited advice
+  types. Configure `METRIC_OPTIONS` in `config/model_config.py`, for example
+  `"MisuseMetric": {"domain": "education"}` and
+  `"NonAdviceMetric": {"advice_types": ["medical", "legal"]}` only when those
+  policies describe the application. Defaults leave both unconfigured.
+  Programmatic test cases can override these settings through a
+  `metric_options` dictionary with the same shape.
+- New judge metrics are advisory until calibrated. Calibration cases for
+  alignment must preserve the actual instruction in
+  `metric_options.PromptAlignmentMetric.prompt_instructions` and the sent
+  prompt in `input`; do not substitute today's default instruction.
+- The three contextual dataset checks now run through `run_preflight` before
+  generation for each selected pytest case. Findings appear separately in the
+  Excel Dataset Checks sheet and HTML report. Execution errors fail the test;
+  low dataset scores do not themselves fail model-answer quality. Missing inputs
+  skip explicitly; behavioural references skip precision and recall. The UI
+  entry point does not invoke this pytest integration. JSON-schema and role
+  checks remain out of scope until test cases define those contracts.
+  ROUGE-L/BLEU now run as advisory lexical comparisons where reference metrics
+  apply; citation and instruction-priority rubrics require explicit opt-in.
+
+Offline verification: `python -m pytest tests/test_metrics.py -o addopts= -q`.
+
 Read from the installed package by walking every submodule of `deepeval.metrics` — not
 `dir()`, which misses six.
 
@@ -94,7 +141,7 @@ argument for a curated registry over auto-discovery: `dir()` plus a field check 
 
 **No statistical tier exists in DeepEval.** Only `ExactMatchMetric` and
 `PatternMatchMetric` avoid an LLM, and both are exact/regex. The `statistical` tier that
-`metric_tiering/tier_classifier.py` reserves is empty by its own admission. Filling it
+`evaluators/tier_classifier.py` reserves is empty by its own admission. Filling it
 requires `sentence-transformers` (semantic similarity), optionally `rouge-score` /
 `sacrebleu`. Semantic similarity is the single highest-value addition in this document: it
 is the only correctness signal available with **no LLM in the loop**.
@@ -389,7 +436,7 @@ repeating a fiction? Only a human can judge that.
 
 ## 5. Profile detection from the spreadsheet -- No need implement for now
 
-**No type column, no per-category sheets.** Today `utils/dataset_loader.py` sets
+**No type column, no per-category sheets.** Today `dataset_checks/dataset_loader.py` sets
 `category = sheet_name`, which means the category is maintained as five separate Excel sheets.
 v3 derives an **evaluation profile** from the row's own content, so the dataset can collapse to
 a single sheet.
@@ -442,7 +489,7 @@ Three reference-free techniques, none of which is a DeepEval metric:
    several times; a model that knows the answer repeats it, a confabulating model varies.
    **Blocked today** — `GENERATOR_TEMPERATURE = 0` makes every run byte-identical, so variance
    is always zero. Needs a separate sampling pass at temperature > 0.
-2. **Hedging detection.** Already implemented: `classification/result_classifier.py`
+2. **Hedging detection.** Already implemented: `evaluators/result_classifier.py`
    classifies such rows `UNVERIFIABLE` and returns `appropriately_hedged` /
    `unsupported_claim_likely` / `not_determined`.
 3. **Specificity without hedging.** A precise answer — names, dates, figures — to a question
@@ -485,7 +532,7 @@ pass? Never average across tiers.
 ### Suggestion engine
 
 Deterministic diagnosis first, LLM wording second. Extend the existing
-`root_cause_analysis/analyzer.py` — which already emits `root_cause`, `confidence` and
+`evaluators/root_cause_analyzer.py` — which already emits `root_cause`, `confidence` and
 `recommended_action` — with a `target` field: `prompt` | `context` | `golden_truth` | `judge` |
 `infra`.
 
@@ -513,7 +560,7 @@ RUN → report + suggestions → human reviews → human edits the Excel
 Excel remains the single source of truth. Two mechanics make it work:
 
 - **Change detection.** Hash the `(Input, Context, Ground_Truth)` triple per row `ID` so a
-  re-run can touch only edited rows. `prompt_versioning/prompt_version_store.py` already
+  re-run can touch only edited rows. `prompts/prompt_version_store.py` already
   hashes prompt text; extend it to the triple.
 - **Attribution.** `run_comparison/fair_comparison.py` already classifies a comparison as
   `capability` / `assisted` / `mixed` and warns on `mixed`. Surface that as guidance: **change
@@ -521,7 +568,7 @@ Excel remains the single source of truth. Two mechanics make it work:
 
 ### Prompt improviser
 
-`utils/prompt_builder.py` returns `test_case["input"]` verbatim — there is no template layer,
+`prompts/prompt_builder.py` returns `test_case["input"]` verbatim — there is no template layer,
 so there is nothing to improve except the question itself, and rewriting the question mutates
 the test.
 
@@ -764,14 +811,14 @@ growing over time as real rows get reviewed, it was never going to be a single c
 | # | Location | Defect | Status |
 |---|---|---|---|
 | 1 | `evaluators/metrics/generic.py:31` | `RETRIEVAL_CONTEXT` hardcoded `False`, so the four context metrics can never apply even though the Context data exists. **One line blocks four metrics.** | ✅ Fixed |
-| 2 | `utils/prompt_builder.py:4` | Context is never sent to the generator, yet it is passed to `LLMTestCase(context=…)` and graded. **The model is judged against evidence it never saw.** | ✅ Fixed |
-| 3 | `prompt_versioning/prompt_version_store.py:48` | `(text or "").encode()` — a blank Excel cell is `float('nan')`, and NaN is truthy, so the guard is skipped and `.encode()` is called on a float. **A blank `Input` crashes the run** inside `build_prompt`, uncaught. | ✅ Fixed |
-| 4 | `utils/dataset_loader.py` | `_has_value()` guards Context and Ground_Truth — both optional — but never `Input`, the one mandatory field. | ✅ Fixed |
+| 2 | `prompts/prompt_builder.py:4` | Context is never sent to the generator, yet it is passed to `LLMTestCase(context=…)` and graded. **The model is judged against evidence it never saw.** | ✅ Fixed |
+| 3 | `prompts/prompt_version_store.py:48` | `(text or "").encode()` — a blank Excel cell is `float('nan')`, and NaN is truthy, so the guard is skipped and `.encode()` is called on a float. **A blank `Input` crashes the run** inside `build_prompt`, uncaught. | ✅ Fixed |
+| 4 | `dataset_checks/dataset_loader.py` | `_has_value()` guards Context and Ground_Truth — both optional — but never `Input`, the one mandatory field. | ✅ Fixed |
 | 5 | `config/judge_model_resolver.py:35` | `get_judge_independence()` has **zero callers**. The one function that reports whether the judge is independent is dead code. | ✅ Fixed — now called from `reporting/report_generator.py` |
 | 6 | `config/judge_model_resolver.py:29` | It compares *provider*, not model — so `phi3` answering and `llama3` judging would still report as not independent. Independence is a property of the model. | ✅ Fixed |
 | 7 | `config/judge_model_resolver.py:29` | The judge is built without an endpoint while the generator receives `GENERATOR_ENDPOINT`. If Ollama moves off the default host, generation works and judging breaks — with errors the tiering downgrades to `not_applicable`. | ✅ Fixed |
 | 8 | `evaluators/metric_manager.py:121` | `"passed" if metric.success else "failed"` hardcodes DeepEval's own threshold rule, leaving no hook for the §4 inversion. | ✅ Fixed |
-| 9 | `classification/result_classifier.py:72` | `unsupported_claim_likely` is triggered merely by "any metric executed" — and `BiasMetric` passing says nothing about whether a claim was supported. The corroboration is not evidence. | ✅ Fixed — now purely the hedging heuristic, no false corroboration |
+| 9 | `evaluators/result_classifier.py:72` | `unsupported_claim_likely` is triggered merely by "any metric executed" — and `BiasMetric` passing says nothing about whether a claim was supported. The corroboration is not evidence. | ✅ Fixed — now purely the hedging heuristic, no false corroboration |
 | 10 | `judge_calibration/data/` | `calibration_judgments.json` is `[]` and `calibration_scores.json` is `{}`. The golden set is empty, so **every judge metric resolves `unverified` → `advisory`** and is excluded from gating. All of them. | 🟡 Mechanism fixed, data thin. Store migrated to `calibration_judgments.xlsx` for human editing; 1 real judgment recorded (`HallucinationMetric`/`Prompt`, agreement 1.0 → `trusted` for that category). Also found and fixed: `calibration_runner.py` was comparing against DeepEval's raw `metric.success`, not the inverted reading — would have mislabeled every adversarial-row judgment as a disagreement. |
 | 11 | `datasets/…with_types.xlsx`, `context_conflict` sheet | The Context column's text leaked into `Ground_Truth`, prefix included: `"Context: Alexander Fleming discovered penicillin."` Those rows can never match anything. | ✅ Fixed — both rows' `Ground_Truth` cells corrected in the workbook |
 | 12 | `datasets/…with_types.xlsx`, `fabricated_entities` sheet | `Ground_Truth` holds behavioural descriptions ("SkyNova AI is a fabricated company"), not reference answers — yet a non-empty value both makes reference metrics applicable and classifies the row `VERIFIED`. | ✅ Fixed — `classify()` now excludes `expects_abstention` rows from `VERIFIED`; reference-metric applicability was already correctly excluded via `metric_registry` |

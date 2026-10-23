@@ -1,7 +1,3 @@
-from utils.report_generator import (
-    generate_excel_report,
-    results_data as legacy_results_data
-)
 from reporting.report_generator import (
     generate_report,
     results_data as pipeline_results_data
@@ -9,8 +5,9 @@ from reporting.report_generator import (
 
 def pytest_sessionfinish(session, exitstatus):
 
-    print("\nGenerating Excel Report...")
-    generate_excel_report(legacy_results_data)
+    if not pipeline_results_data:
+        print("\nNo test results collected -- skipping report generation.")
+        return
 
     print("\nGenerating Evaluation Report...")
     generate_report(pipeline_results_data)

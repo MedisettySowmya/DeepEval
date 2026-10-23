@@ -5,30 +5,6 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-
-# Flat-file, git-trackable store of human-recorded calibration judgments --
-# the "golden set" from trustworthy-ai-eval-architecture.md's Judge
-# Calibration Layer, adapted to this project. Each entry is a human's own
-# independent verdict on what a specific metric SHOULD have said about a
-# specific (test case, response) pair -- this is the human-verified label
-# the calibration layer later checks the judge's actual verdict against.
-#
-# Kept as an Excel workbook rather than JSON specifically so a human can
-# open, sort, filter and hand-edit it (human_verdict and notes especially)
-# the same way they already work with the dataset and benchmark data in
-# this project. judge_calibration/calibration_runner.py is unaffected by
-# this -- it only ever calls load_calibration_judgments() and never reads
-# this module's storage format directly.
-#
-# test_case is stored losslessly as a JSON string in test_case_json, which
-# is what calibration_runner actually re-runs the metric against. The other
-# columns (input/context/ground_truth/profile/...) are flattened copies of
-# the same data purely so a human skimming the sheet doesn't have to open a
-# JSON blob to read a row. Editing those flattened columns does not change
-# what gets re-run -- only test_case_json, actual_output and metric_key do.
-# A row added by hand with no test_case_json still works: it is
-# reconstructed from the flattened columns instead, just with fewer fields
-# available to whichever metric needs them.
 _JUDGMENTS_PATH = os.path.join(os.path.dirname(__file__), "data", "calibration_judgments.xlsx")
 
 VALID_VERDICTS = {"pass", "fail"}
@@ -39,10 +15,8 @@ _COLUMNS = [
     "actual_output", "human_verdict", "notes", "test_case_json",
 ]
 
-
 class CalibrationError(Exception):
     pass
-
 
 def _ensure_file():
     os.makedirs(os.path.dirname(_JUDGMENTS_PATH), exist_ok=True)
@@ -51,14 +25,12 @@ def _ensure_file():
             _JUDGMENTS_PATH, index=False, engine="openpyxl"
         )
 
-
 def _context_to_text(context):
     if not context:
         return ""
     if isinstance(context, (list, tuple)):
         return "\n".join(str(item) for item in context if str(item).strip())
     return str(context)
-
 
 def _clean(value):
     """pandas hands back float('nan') for a blank cell -- NaN is truthy in
@@ -68,7 +40,6 @@ def _clean(value):
     if isinstance(value, float) and pd.isna(value):
         return None
     return value
-
 
 def _row_from_entry(entry):
 
@@ -92,7 +63,6 @@ def _row_from_entry(entry):
         "test_case_json": json.dumps(test_case, default=str),
     }
 
-
 def _entry_from_row(row):
 
     test_case_json = _clean(row.get("test_case_json"))
@@ -105,10 +75,6 @@ def _entry_from_row(row):
             test_case = None
 
     if test_case is None:
-        # No usable test_case_json -- either a hand-added row, or a
-        # corrupted cell. Reconstruct what we can from the flattened
-        # columns so the row still participates in calibration, with
-        # whatever fields a human actually filled in.
         context_text = _clean(row.get("context"))
         test_case = {
             "id": _clean(row.get("row_id")),
@@ -132,19 +98,16 @@ def _entry_from_row(row):
         "notes": _clean(row.get("notes")),
     }
 
-
 def load_calibration_judgments():
     _ensure_file()
     df = pd.read_excel(_JUDGMENTS_PATH, engine="openpyxl")
     return [_entry_from_row(row) for row in df.to_dict(orient="records")]
-
 
 def _save_calibration_judgments(judgments):
     _ensure_file()
     rows = [_row_from_entry(entry) for entry in judgments]
     df = pd.DataFrame(rows, columns=_COLUMNS)
     df.to_excel(_JUDGMENTS_PATH, index=False, engine="openpyxl")
-
 
 def record_calibration_judgment(
     test_case, actual_output, metric_key, human_verdict,
@@ -185,7 +148,6 @@ def record_calibration_judgment(
     _save_calibration_judgments(judgments)
 
     return entry
-
 
 def remove_judgment(entry_id):
     """Explicit, human-invoked removal -- e.g. retracting a mistaken

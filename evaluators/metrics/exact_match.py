@@ -1,9 +1,8 @@
 from deepeval.metrics import ExactMatchMetric
 from deepeval.test_case import LLMTestCaseParams
 
-from config import model_config
+from config import settings
 from evaluators import metric_registry
-
 
 KEY = "ExactMatchMetric"
 METRIC_CLASS = ExactMatchMetric
@@ -13,7 +12,6 @@ REQUIRED_PARAMS = [
     LLMTestCaseParams.ACTUAL_OUTPUT,
     LLMTestCaseParams.EXPECTED_OUTPUT,
 ]
-
 
 def is_applicable(test_case):
     """Narrowed rather than removed.
@@ -40,10 +38,8 @@ def is_applicable(test_case):
 
     return True, None
 
-
 def build(judge_model):
-    # Deterministic string comparison -- no judge model involved.
-    threshold = model_config.METRIC_THRESHOLDS.get(
-        KEY, model_config.DEFAULT_METRIC_THRESHOLD
+    threshold = settings.METRIC_THRESHOLDS.get(
+        KEY, settings.DEFAULT_METRIC_THRESHOLD
     )
     return METRIC_CLASS(threshold=threshold)
